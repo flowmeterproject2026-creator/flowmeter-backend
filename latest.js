@@ -1,13 +1,13 @@
-// api/latest.js
 import fs from "fs";
 
 export default function handler(req, res) {
-  const path = "/tmp/latest.json";
+  const file = "/tmp/latest.json";
 
-  if (!fs.existsSync(path)) {
+  if (!fs.existsSync(file)) {
     return res.status(200).json({ status: "NO_DATA" });
   }
 
-  const json = JSON.parse(fs.readFileSync(path));
-  res.status(200).json(json);
+  const json = JSON.parse(fs.readFileSync(file));
+  return res.status(200).json(json);
 }
+
