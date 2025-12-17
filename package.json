@@ -1,8 +1,9 @@
 {
   "name": "flowmeter-backend",
   "version": "1.0.0",
-  "type": "module",
-  "dependencies": {
-    "node-fetch": "^3.3.2"
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
   }
 }
+
