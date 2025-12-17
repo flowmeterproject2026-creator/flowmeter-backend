@@ -1,4 +1,4 @@
-// api/latest.js
+
 import fs from "fs";
 
 export default function handler(req, res) {
