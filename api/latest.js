@@ -8,6 +8,7 @@ export default function handler(req, res) {
     return res.status(200).json({ status: "NO_DATA" });
   }
 
-  const json = JSON.parse(fs.readFileSync(path));
+  const json = JSON.parse(fs.readFileSync(path, "utf8"));
+
   res.status(200).json(json);
 }
