@@ -37,6 +37,8 @@ export default async function handler(req, res) {
     // Save data to /tmp/latest.json
     const filePath = "/tmp/latest.json";
     fs.writeFileSync(filePath, JSON.stringify(json, null, 2));
+    console.log("💾 Saved to /tmp/latest.json");
+
 
     // 🔔 If danger → Send push via OneSignal
     if (status === "DANGER") {
