@@ -1,6 +1,10 @@
 import fs from "fs";
+import path from "path";
+import https from "https";
 
-export const config = { api: { bodyParser: false } };
+export const config = {
+  api: { bodyParser: false }
+};
 
 export default async function handler(req, res) {
   try {
@@ -14,37 +18,38 @@ export default async function handler(req, res) {
       req.on("end", resolve);
     });
 
-    if (!raw || raw.trim().length === 0) {
-      return res.status(400).json({ error: "Empty body received" });
+    let json = JSON.parse(raw);
+
+    const filePath = "/tmp/latest.json";
+    fs.writeFileSync(filePath, JSON.stringify(json, null, 2));
+
+    // ---- Trigger OneSignal on DANGER ----
+    if (json.status === "DANGER") {
+      const body = JSON.stringify({
+        app_id: process.env.86947b42-989c-49cc-80fc-7e50960b8b7f,
+        included_segments: ["All"],
+        contents: { en: "⚠️ DANGER detected in water flow meter!" }
+      });
+
+      const reqOptions = {
+        hostname: "api.onesignal.com",
+        path: "/v1/notifications",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Basic ${process.env.67fhahjaqemmfe4iqapre7lk6}`
+        }
+      };
+
+      const request = https.request(reqOptions);
+      request.write(body);
+      request.end();
     }
-
-    let json;
-    try {
-      json = JSON.parse(raw);
-    } catch (err) {
-      return res.status(400).json({ error: "Bad JSON", raw });
-    }
-
-    const { pulses, rotations, lat, lon, status } = json;
-
-    if (
-      pulses === undefined ||
-      rotations === undefined ||
-      lat === undefined ||
-      lon === undefined ||
-      status === undefined
-    ) {
-      return res
-        .status(400)
-        .json({ error: "Missing fields", received: json });
-    }
-
-    fs.writeFileSync("/tmp/latest.json", JSON.stringify(json, null, 2));
 
     return res.status(200).json({ success: true, saved: json });
-  } catch (err) {
-    return res
-      .status(500)
-      .json({ error: "Server error", detail: err.toString() });
+
+  } catch (e) {
+    return res.status(500).json({ error: e.toString() });
   }
 }
+
