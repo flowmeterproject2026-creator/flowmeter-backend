@@ -1,4 +1,3 @@
-
 import fs from "fs";
 
 export default function handler(req, res) {
@@ -9,6 +8,5 @@ export default function handler(req, res) {
   }
 
   const json = JSON.parse(fs.readFileSync(path, "utf8"));
-
-  res.status(200).json(json);
+  return res.status(200).json(json);
 }
