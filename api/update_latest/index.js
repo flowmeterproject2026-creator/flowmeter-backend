@@ -9,6 +9,8 @@ const FILE_PATH = "/tmp/latest.json";
 // OneSignal Config
 // ======================
 console.log("ONESIGNAL_APP_ID =", process.env.ONESIGNAL_APP_ID);
+
+const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
 
 export const config = {
@@ -84,6 +86,11 @@ export default async function handler(req, res) {
 // 🔔 OneSignal Push
 // ======================
 async function sendOneSignalAlert(data) {
+
+  if (!ONESIGNAL_APP_ID || !ONESIGNAL_API_KEY) {
+    console.error("❌ OneSignal env vars missing");
+    return;
+  }
 
   const payload = {
     app_id: ONESIGNAL_APP_ID,
