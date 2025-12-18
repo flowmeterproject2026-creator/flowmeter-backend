@@ -8,7 +8,7 @@ const FILE_PATH = "/tmp/latest.json";
 // ======================
 // OneSignal Config
 // ======================
-const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
+console.log("ONESIGNAL_APP_ID =", process.env.ONESIGNAL_APP_ID);
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
 
 export const config = {
