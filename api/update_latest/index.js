@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import fetch from "node-fetch";
+
 
 // ======================
 // FILE PATHS
@@ -122,7 +122,7 @@ async function sendOneSignalAlert(data) {
     }
   };
 
-  await fetch("https://onesignal.com/api/v1/notifications", {
+ const response=  await fetch("https://onesignal.com/api/v1/notifications", {
     method: "POST",
     headers: {
       "Authorization": `Basic ${ONESIGNAL_API_KEY}`,
