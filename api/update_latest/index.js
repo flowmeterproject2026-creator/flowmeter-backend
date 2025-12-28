@@ -1,6 +1,4 @@
 import fs from "fs";
-import path from "path";
-
 
 // ======================
 // FILE PATHS
@@ -21,7 +19,7 @@ export const config = {
 export default async function handler(req, res) {
 
   // ======================
-  // POST → ESP32 sends data
+  // POST → ESP32
   // ======================
   if (req.method === "POST") {
 
@@ -38,7 +36,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Invalid JSON" });
     }
 
-    // 🔍 Load previous status
+    // Load previous status
     let previousStatus = null;
     if (fs.existsSync(FILE_PATH)) {
       try {
@@ -46,31 +44,31 @@ export default async function handler(req, res) {
       } catch {}
     }
 
-    // 💾 Save latest
+    // Save latest
     fs.writeFileSync(FILE_PATH, JSON.stringify(data, null, 2));
 
-    // ⏱ Save history
+    // ===== HISTORY (SAFE, SINGLE now) =====
     const now = new Date();
 
-// ⏱ Save history (FIXED)
-  const now = new Date();
-  const entry = {
-    ...data,
-    timestamp: now.getTime(),
-    date: now.toLocaleDateString("en-CA", {
-      timeZone: "Asia/Kolkata"
-    })
-  };
-  
-  let history = [];
-  if (fs.existsSync(HISTORY_PATH)) {
-    history = JSON.parse(fs.readFileSync(HISTORY_PATH));
-  }
-  history.push(entry);
-  if (history.length > 1000) history = history.slice(-1000);
-  fs.writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2));
+    const entry = {
+      ...data,
+      timestamp: now.getTime(),
+      date: now.toLocaleDateString("en-CA", {
+        timeZone: "Asia/Kolkata"
+      })
+    };
 
-    // 🚨 Notify only on SAFE → DANGER
+    let history = [];
+    if (fs.existsSync(HISTORY_PATH)) {
+      history = JSON.parse(fs.readFileSync(HISTORY_PATH));
+    }
+
+    history.push(entry);
+    if (history.length > 1000) history = history.slice(-1000);
+
+    fs.writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2));
+
+    // 🚨 OneSignal (SAFE → DANGER only)
     if (
       data.status?.toUpperCase() === "DANGER" &&
       previousStatus?.toUpperCase() !== "DANGER"
@@ -82,7 +80,7 @@ export default async function handler(req, res) {
   }
 
   // ======================
-  // GET → Dashboard (latest)
+  // GET → Latest
   // ======================
   if (req.method === "GET" && !req.query.date) {
     if (!fs.existsSync(FILE_PATH)) return res.json({});
@@ -92,41 +90,35 @@ export default async function handler(req, res) {
   // ======================
   // GET → History by date
   // ======================
-   // 📅 GET → History by date (FIXED)
   if (req.method === "GET" && req.query.date) {
     if (!fs.existsSync(HISTORY_PATH)) return res.json([]);
     const history = JSON.parse(fs.readFileSync(HISTORY_PATH));
-    const filtered = history.filter(
-      h => h.date === req.query.date
-    );
-    return res.json(filtered);
-  }
-  
-  
-    res.status(405).end();
+    return res.json(history.filter(h => h.date === req.query.date));
   }
 
+  return res.status(405).end();
+}
+
 // ======================
-// 🔔 OneSignal Push
+// 🔔 OneSignal Push (NO IMPORTS)
 // ======================
 async function sendOneSignalAlert(data) {
   if (!ONESIGNAL_APP_ID || !ONESIGNAL_API_KEY) return;
 
-  const payload = {
-    app_id: ONESIGNAL_APP_ID,
-    included_segments: ["All"],
-    headings: { en: "🚨 FLOW METER ALERT" },
-    contents: {
-      en: `DANGER detected!\nPulses: ${data.pulses}\nRotations: ${data.rotations}`
-    }
-  };
-
- const response=  await fetch("https://onesignal.com/api/v1/notifications", {
+  await fetch("https://onesignal.com/api/v1/notifications", {
     method: "POST",
     headers: {
       "Authorization": `Basic ${ONESIGNAL_API_KEY}`,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      app_id: ONESIGNAL_APP_ID,
+      included_segments: ["All"],
+      headings: { en: "🚨 FLOW METER ALERT" },
+      contents: {
+        en: `DANGER detected!\nPulses: ${data.pulses}\nRotations: ${data.rotations}`
+      }
+    })
   });
 }
+
