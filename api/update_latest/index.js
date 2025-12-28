@@ -50,20 +50,25 @@ export default async function handler(req, res) {
     fs.writeFileSync(FILE_PATH, JSON.stringify(data, null, 2));
 
     // ⏱ Save history
-    const entry = { ...data, timestamp: Date.now() };
+    const now = new Date();
 
-    let history = [];
-    if (fs.existsSync(HISTORY_PATH)) {
-      history = JSON.parse(fs.readFileSync(HISTORY_PATH));
-    }
-
-    history.push(entry);
-
-    if (history.length > 1000) {
-      history = history.slice(-1000);
-    }
-
-    fs.writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2));
+// ⏱ Save history (FIXED)
+  const now = new Date();
+  const entry = {
+    ...data,
+    timestamp: now.getTime(),
+    date: now.toLocaleDateString("en-CA", {
+      timeZone: "Asia/Kolkata"
+    })
+  };
+  
+  let history = [];
+  if (fs.existsSync(HISTORY_PATH)) {
+    history = JSON.parse(fs.readFileSync(HISTORY_PATH));
+  }
+  history.push(entry);
+  if (history.length > 1000) history = history.slice(-1000);
+  fs.writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2));
 
     // 🚨 Notify only on SAFE → DANGER
     if (
@@ -87,25 +92,19 @@ export default async function handler(req, res) {
   // ======================
   // GET → History by date
   // ======================
+   // 📅 GET → History by date (FIXED)
   if (req.method === "GET" && req.query.date) {
-
     if (!fs.existsSync(HISTORY_PATH)) return res.json([]);
-
-    const date = req.query.date;
-    const start = new Date(date).setHours(0, 0, 0, 0);
-    const end = new Date(date).setHours(23, 59, 59, 999);
-
     const history = JSON.parse(fs.readFileSync(HISTORY_PATH));
-
     const filtered = history.filter(
-      h => h.timestamp >= start && h.timestamp <= end
+      h => h.date === req.query.date
     );
-
     return res.json(filtered);
   }
-
-  res.status(405).end();
-}
+  
+  
+    res.status(405).end();
+  }
 
 // ======================
 // 🔔 OneSignal Push
