@@ -2,6 +2,7 @@
   "name": "flowmeter-backend",
   "version": "1.0.0",
   "type": "module",
-  "dependencies": {}
+  "dependencies": {
+    "mongodb": "^7.0.0"
+  }
 }
-
