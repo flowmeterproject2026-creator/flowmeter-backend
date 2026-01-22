@@ -4,15 +4,15 @@ import { MongoClient } from "mongodb";
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB || "flowmeter";
 const HISTORY_COL = process.env.MONGODB_COLLECTION || "history";
-const LATEST_COL = "latest"; // store 1 doc only
+const LATEST_COL = "latest";
 
 // ===== OneSignal ENV =====
 const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
 
-// ✅ Small limit to protect free tier
-const MAX_HISTORY_DOCS = 5000; // keep last 5000 only
-const MAX_BODY_BYTES = 512;    // reject if ESP sends too big body
+// ✅ Limits (for free tier)
+const MAX_HISTORY_DOCS = 5000;
+const MAX_BODY_BYTES = 512;
 
 let cachedClient = null;
 
@@ -24,14 +24,13 @@ async function getClient() {
   return client;
 }
 
-// ✅ Keep only required fields (compressed)
 function compressReading(input) {
   return {
-    p: Number(input.pulses ?? input.p ?? 0),        // pulses
-    r: Number(input.rotations ?? input.r ?? 0),     // rotations
-    la: Number(input.lat ?? input.la ?? 0),         // latitude
-    lo: Number(input.lon ?? input.lo ?? 0),         // longitude
-    s: String(input.status ?? input.s ?? "NORMAL").toUpperCase(), // status
+    p: Number(input.pulses ?? input.p ?? 0),
+    r: Number(input.rotations ?? input.r ?? 0),
+    la: Number(input.lat ?? input.la ?? 0),
+    lo: Number(input.lon ?? input.lo ?? 0),
+    s: String(input.status ?? input.s ?? "NORMAL").toUpperCase(),
   };
 }
 
@@ -40,12 +39,16 @@ function todayIST() {
 }
 
 export default async function handler(req, res) {
-  // ✅ CORS for Web + Flutter
+  // ✅ CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
   if (req.method === "OPTIONS") return res.status(200).end();
+
+  // ✅ Mongo check
+  if (!MONGODB_URI) {
+    return res.status(500).json({ error: "MONGODB_URI missing in Vercel ENV" });
+  }
 
   const client = await getClient();
   const db = client.db(DB_NAME);
@@ -56,64 +59,59 @@ export default async function handler(req, res) {
   // ✅ POST (ESP32 sends data)
   // ==========================
   if (req.method === "POST") {
-    // ✅ Read raw body with byte limit
     let raw = "";
     let size = 0;
 
-    await new Promise((resolve, reject) => {
-      req.on("data", (chunk) => {
-        size += chunk.length;
-        if (size > MAX_BODY_BYTES) {
-          reject(new Error("Payload too large"));
-          return;
-        }
-        raw += chunk;
+    try {
+      await new Promise((resolve, reject) => {
+        req.on("data", (chunk) => {
+          size += chunk.length;
+
+          if (size > MAX_BODY_BYTES) {
+            reject(new Error("Payload too large"));
+            return;
+          }
+
+          raw += chunk;
+        });
+
+        req.on("end", resolve);
+        req.on("error", reject);
       });
-      req.on("end", resolve);
-      req.on("error", reject);
-    }).catch(() => {
+    } catch (e) {
       return res.status(413).json({ error: "Payload too large" });
-    });
+    }
 
     let data;
     try {
       data = JSON.parse(raw);
-    } catch {
+    } catch (e) {
       return res.status(400).json({ error: "Invalid JSON" });
     }
 
     const now = new Date();
-    const date = todayIST();
+    const entry = {
+      ...compressReading(data),
+      t: now.getTime(),
+      d: todayIST(),
+    };
 
-    const compressed = compressReading(data);
-
-    // ✅ previous status from latest collection (SAFE->DANGER alert only)
     const prev = await latestCol.findOne({ _id: "latest" });
     const previousStatus = prev?.s ?? "NORMAL";
 
-    // ✅ final history entry
-    const entry = {
-      ...compressed,
-      t: now.getTime(), // timestamp
-      d: date,          // yyyy-MM-dd
-    };
-
-    // ✅ Save latest (overwrite 1 doc)
     await latestCol.updateOne(
       { _id: "latest" },
       { $set: entry },
       { upsert: true }
     );
 
-    // ✅ Save to history (all-time)
     await historyCol.insertOne(entry);
 
-    // ✅ Keep DB size controlled (FREE TIER SAFE)
+    // ✅ keep max docs
     const count = await historyCol.estimatedDocumentCount();
     if (count > MAX_HISTORY_DOCS) {
       const extra = count - MAX_HISTORY_DOCS;
 
-      // delete oldest docs
       const oldest = await historyCol
         .find({})
         .sort({ t: 1 })
@@ -126,8 +124,8 @@ export default async function handler(req, res) {
       }
     }
 
-    // ✅ OneSignal (don’t block API response)
-    if (compressed.s === "DANGER" && previousStatus !== "DANGER") {
+    // ✅ OneSignal (non-blocking)
+    if (entry.s === "DANGER" && previousStatus !== "DANGER") {
       sendOneSignalAlert(entry);
     }
 
@@ -139,10 +137,8 @@ export default async function handler(req, res) {
   // ==========================
   if (req.method === "GET" && !req.query.date && !req.query.csv) {
     const latest = await latestCol.findOne({ _id: "latest" });
-
     if (!latest) return res.status(200).json({});
 
-    // ✅ Return expanded JSON (Flutter friendly)
     return res.status(200).json({
       pulses: latest.p,
       rotations: latest.r,
@@ -156,7 +152,6 @@ export default async function handler(req, res) {
 
   // ==========================
   // ✅ GET History by date
-  // /api/update_latest?date=2026-01-22
   // ==========================
   if (req.method === "GET" && req.query.date && !req.query.csv) {
     const date = req.query.date;
@@ -164,10 +159,9 @@ export default async function handler(req, res) {
     const list = await historyCol
       .find({ d: date })
       .sort({ t: -1 })
-      .limit(2000) // safety limit
+      .limit(2000)
       .toArray();
 
-    // ✅ return expanded format
     return res.status(200).json(
       list.map((x) => ({
         pulses: x.p,
@@ -182,9 +176,7 @@ export default async function handler(req, res) {
   }
 
   // ==========================
-  // ✅ CSV Export
-  // ✅ All time: /api/update_latest?csv=1
-  // ✅ Date:     /api/update_latest?csv=1&date=2026-01-22
+  // ✅ CSV Export (all or date)
   // ==========================
   if (req.method === "GET" && req.query.csv) {
     const filter = req.query.date ? { d: req.query.date } : {};
@@ -198,7 +190,9 @@ export default async function handler(req, res) {
     res.setHeader("Content-Type", "text/csv");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="flowmeter_history${req.query.date ? "_" + req.query.date : ""}.csv"`
+      `attachment; filename="flowmeter_history${
+        req.query.date ? "_" + req.query.date : ""
+      }.csv"`
     );
 
     return res.status(200).send(csv);
@@ -233,5 +227,6 @@ async function sendOneSignalAlert(entry) {
     console.log("OneSignal error:", e);
   }
 }
+
 
 
