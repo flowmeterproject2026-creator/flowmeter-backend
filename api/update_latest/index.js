@@ -179,7 +179,7 @@ if (req.method === "OPTIONS") return res.status(200).end();
 
 
 // ==========================
-// ✅ CSV Export (Excel Safe)
+// ✅ CSV Export (Excel Safe Timestamp)
 // ==========================
 if (req.method === "GET" && req.query.csv) {
   try {
@@ -199,17 +199,16 @@ if (req.method === "GET" && req.query.csv) {
         hour12: false,
       });
 
-      // ✅ Make Excel treat values as text:
-      const safeDatetime = `"${dt}"`;
-      const safeTimestamp = `"${x.t}"`;
-
-      csv += `${safeDatetime},${safeTimestamp},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
+      // ✅ Excel safe text values
+      csv += `"${dt}","${x.t}",${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
     }
 
     res.setHeader("Content-Type", "text/csv");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="flowmeter_history${req.query.date ? "_" + req.query.date : ""}.csv"`
+      `attachment; filename="flowmeter_history${
+        req.query.date ? "_" + req.query.date : ""
+      }.csv"`
     );
 
     return res.status(200).send(csv);
