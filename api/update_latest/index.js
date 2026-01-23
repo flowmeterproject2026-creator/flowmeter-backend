@@ -177,7 +177,7 @@ export default async function handler(req, res) {
 
 
 // ==========================
-// ✅ CSV Export (all or date) - FINAL (Readable + Timestamp)
+// ✅ CSV Export (Excel Safe)
 // ==========================
 if (req.method === "GET" && req.query.csv) {
   try {
@@ -186,10 +186,9 @@ if (req.method === "GET" && req.query.csv) {
     const list = await historyCol
       .find(filter)
       .sort({ t: 1 })
-      .limit(5000) // ✅ prevents Vercel crash
+      .limit(5000)
       .toArray();
 
-    // ✅ FINAL CSV (best)
     let csv = "datetime,timestamp,status,pulses,rotations,lat,lon\n";
 
     for (const x of list) {
@@ -198,23 +197,22 @@ if (req.method === "GET" && req.query.csv) {
         hour12: false,
       });
 
-      csv += `${dt},${x.t},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
+      // ✅ Make Excel treat values as text:
+      const safeDatetime = `"${dt}"`;
+      const safeTimestamp = `"${x.t}"`;
+
+      csv += `${safeDatetime},${safeTimestamp},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
     }
 
     res.setHeader("Content-Type", "text/csv");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="flowmeter_history${
-        req.query.date ? "_" + req.query.date : ""
-      }.csv"`
+      `attachment; filename="flowmeter_history${req.query.date ? "_" + req.query.date : ""}.csv"`
     );
 
     return res.status(200).send(csv);
   } catch (e) {
-    return res.status(500).json({
-      error: "CSV Export Failed",
-      details: String(e),
-    });
+    return res.status(500).json({ error: "CSV Export Failed", details: String(e) });
   }
 }
 
