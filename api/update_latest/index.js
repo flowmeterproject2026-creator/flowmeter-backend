@@ -175,29 +175,37 @@ export default async function handler(req, res) {
     );
   }
 
- // ==========================
+
+// ==========================
 // ✅ CSV Export (all or date)
 // ==========================
 if (req.method === "GET" && req.query.csv) {
-  const filter = req.query.date ? { d: req.query.date } : {};
-  const list = await historyCol.find(filter).sort({ t: 1 }).toArray();
+  try {
+    const filter = req.query.date ? { d: String(req.query.date) } : {};
 
-  // ✅ Always return CSV file (even if list is empty)
-  let csv = "timestamp,date,status,pulses,rotations,lat,lon\n";
+    const list = await historyCol
+      .find(filter)
+      .sort({ t: 1 })
+      .limit(5000) // ✅ prevents Vercel crash
+      .toArray();
 
-  for (const x of list) {
-    csv += `${x.t},${x.d},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
+    let csv = "timestamp,date,status,pulses,rotations,lat,lon\n";
+    for (const x of list) {
+      csv += `${x.t},${x.d},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
+    }
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="flowmeter_history${
+        req.query.date ? "_" + req.query.date : ""
+      }.csv"`
+    );
+
+    return res.status(200).send(csv);
+  } catch (e) {
+    return res.status(500).json({ error: "CSV Export Failed", details: String(e) });
   }
-
-  res.setHeader("Content-Type", "text/csv");
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename="flowmeter_history${
-      req.query.date ? "_" + req.query.date : ""
-    }.csv"`
-  );
-
-  return res.status(200).send(csv);
 }
 
 
