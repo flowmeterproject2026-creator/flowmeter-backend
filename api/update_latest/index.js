@@ -175,28 +175,31 @@ export default async function handler(req, res) {
     );
   }
 
-  // ==========================
-  // ✅ CSV Export (all or date)
-  // ==========================
-  if (req.method === "GET" && req.query.csv) {
-    const filter = req.query.date ? { d: req.query.date } : {};
-    const list = await historyCol.find(filter).sort({ t: 1 }).toArray();
+ // ==========================
+// ✅ CSV Export (all or date)
+// ==========================
+if (req.method === "GET" && req.query.csv) {
+  const filter = req.query.date ? { d: req.query.date } : {};
+  const list = await historyCol.find(filter).sort({ t: 1 }).toArray();
 
-    let csv = "timestamp,date,status,pulses,rotations,lat,lon\n";
-    for (const x of list) {
-      csv += `${x.t},${x.d},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
-    }
+  // ✅ Always return CSV file (even if list is empty)
+  let csv = "timestamp,date,status,pulses,rotations,lat,lon\n";
 
-    res.setHeader("Content-Type", "text/csv");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="flowmeter_history${
-        req.query.date ? "_" + req.query.date : ""
-      }.csv"`
-    );
-
-    return res.status(200).send(csv);
+  for (const x of list) {
+    csv += `${x.t},${x.d},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
   }
+
+  res.setHeader("Content-Type", "text/csv");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="flowmeter_history${
+      req.query.date ? "_" + req.query.date : ""
+    }.csv"`
+  );
+
+  return res.status(200).send(csv);
+}
+
 
   return res.status(405).json({ error: "Method not allowed" });
 }
