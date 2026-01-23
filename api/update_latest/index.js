@@ -177,7 +177,7 @@ export default async function handler(req, res) {
 
 
 // ==========================
-// ✅ CSV Export (all or date)
+// ✅ CSV Export (all or date) - FINAL (Readable + Timestamp)
 // ==========================
 if (req.method === "GET" && req.query.csv) {
   try {
@@ -189,9 +189,16 @@ if (req.method === "GET" && req.query.csv) {
       .limit(5000) // ✅ prevents Vercel crash
       .toArray();
 
-    let csv = "timestamp,date,status,pulses,rotations,lat,lon\n";
+    // ✅ FINAL CSV (best)
+    let csv = "datetime,timestamp,status,pulses,rotations,lat,lon\n";
+
     for (const x of list) {
-      csv += `${x.t},${x.d},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
+      const dt = new Date(Number(x.t)).toLocaleString("en-GB", {
+        timeZone: "Asia/Kolkata",
+        hour12: false,
+      });
+
+      csv += `${dt},${x.t},${x.s},${x.p},${x.r},${x.la},${x.lo}\n`;
     }
 
     res.setHeader("Content-Type", "text/csv");
@@ -204,9 +211,13 @@ if (req.method === "GET" && req.query.csv) {
 
     return res.status(200).send(csv);
   } catch (e) {
-    return res.status(500).json({ error: "CSV Export Failed", details: String(e) });
+    return res.status(500).json({
+      error: "CSV Export Failed",
+      details: String(e),
+    });
   }
 }
+
 
 
   return res.status(405).json({ error: "Method not allowed" });
