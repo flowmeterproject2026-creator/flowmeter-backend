@@ -5,6 +5,8 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB || "flowmeter";
 const HISTORY_COL = process.env.MONGODB_COLLECTION || "history";
 const LATEST_COL = "latest";
+let lastSavedTime = 0;
+
 
 // ===== OneSignal ENV =====
 const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
@@ -107,7 +109,12 @@ if (req.method === "OPTIONS") return res.status(200).end();
       { upsert: true }
     );
 
-    await historyCol.insertOne(entry);
+    // ✅ store only every 10 seconds
+if (Date.now() - lastSavedTime > 10000) {
+  await historyCol.insertOne(entry);
+  lastSavedTime = Date.now();
+}
+
 
     // ✅ keep max docs
     const count = await historyCol.estimatedDocumentCount();
