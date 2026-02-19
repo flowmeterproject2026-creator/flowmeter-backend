@@ -188,10 +188,20 @@ export default async function handler(req, res) {
     // ==========================
     // ALERT
     // ==========================
-    if (status === "DANGER" && previousStatus !== "DANGER") {
-      sendOneSignalAlert(entry);
-    }
+   // ==========================
+// ALERT — trigger every DANGER with 60s cooldown
+// ==========================
+const lastAlertTime = prev?.lastAlert ?? 0;
+const cooldownMs = 60000; // ✅ 60 seconds between alerts
 
+if (status === "DANGER" && (Date.now() - lastAlertTime > cooldownMs)) {
+  // ✅ Save alert time to DB so it persists across serverless instances
+  await latestCol.updateOne(
+    { _id: "latest" },
+    { $set: { lastAlert: Date.now() } }
+  );
+  sendOneSignalAlert(entry);
+}
     return res.status(200).json({ success: true, status });
   }
 
