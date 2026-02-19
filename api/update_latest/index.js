@@ -5,7 +5,6 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB || "flowmeter";
 const HISTORY_COL = process.env.MONGODB_COLLECTION || "history";
 const LATEST_COL = "latest";
-
 const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
 
@@ -13,7 +12,6 @@ const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
 const MAX_HISTORY_DOCS = 5000;
 const MAX_BODY_BYTES = 512;
 const SAVE_INTERVAL_MS = 10000;
-
 const SAFE_THRESHOLD = 120;
 const SPIKE_LIMIT = 40;
 const NOISE_THRESHOLD = 2;
@@ -32,27 +30,19 @@ async function getClient() {
 }
 
 // ======================
-// STATUS LOGIC (NO GLOBALS)
+// STATUS LOGIC
 // ======================
 function computeStatus(currentFlow, previousFlow) {
   let flow = currentFlow;
 
-  // Noise filter
   if (Math.abs(flow - previousFlow) < NOISE_THRESHOLD) {
     flow = previousFlow;
   }
 
   let status = "SAFE";
 
-  // Threshold check
-  if (flow > SAFE_THRESHOLD) {
-    status = "DANGER";
-  }
-
-  // Spike detection
-  if (Math.abs(flow - previousFlow) > SPIKE_LIMIT) {
-    status = "DANGER";
-  }
+  if (flow > SAFE_THRESHOLD) status = "DANGER";
+  if (Math.abs(flow - previousFlow) > SPIKE_LIMIT) status = "DANGER";
 
   return { status, flow };
 }
@@ -83,10 +73,10 @@ function normalizeStatus(s) {
 // MAIN HANDLER
 // ======================
 export default async function handler(req, res) {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "*");
+
   if (req.method === "OPTIONS") return res.status(200).end();
 
   if (!MONGODB_URI) {
@@ -98,101 +88,113 @@ export default async function handler(req, res) {
   const historyCol = db.collection(HISTORY_COL);
   const latestCol = db.collection(LATEST_COL);
 
- if (req.method === "POST") {
-  let raw = "";
-  let size = 0;
-
-  try {
-    await new Promise((resolve, reject) => {
-      req.on("data", (chunk) => {
-        size += chunk.length;
-        if (size > MAX_BODY_BYTES) return reject();
-        raw += chunk;
-      });
-      req.on("end", resolve);
-      req.on("error", reject);
-    });
-  } catch {
-    return res.status(413).json({ error: "Payload too large" });
-  }
-
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    return res.status(400).json({ error: "Invalid JSON" });
-  }
-
-  const compressed = compressReading(data);
-
-  // ✅ GET PREVIOUS
-  const prev = await latestCol.findOne({ _id: "latest" }) || {};
-  const previousFlow = prev.r || 0;
-  const lastAlertTime = prev.lastAlert || 0;
-
-  // ✅ COMPUTE STATUS
-  const { status, flow } = computeStatus(compressed.r, previousFlow);
-
-  const nowTime = Date.now();
-
-  const entry = {
-    ...compressed,
-    r: flow,
-    s: status,
-    t: nowTime,
-    d: todayIST(),
-  };
-
   // ==========================
-  // SAVE HISTORY (10 sec)
+  // POST (ESP32)
   // ==========================
-  if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
-    await historyCol.insertOne(entry);
+  if (req.method === "POST") {
+    let raw = "";
+    let size = 0;
 
-    const count = await historyCol.estimatedDocumentCount();
-    if (count > MAX_HISTORY_DOCS) {
-      const extra = count - MAX_HISTORY_DOCS;
-      const oldest = await historyCol
-        .find({})
-        .sort({ t: 1 })
-        .limit(extra)
-        .project({ _id: 1 })
-        .toArray();
-
-      if (oldest.length > 0) {
-        await historyCol.deleteMany({
-          _id: { $in: oldest.map((x) => x._id) },
+    try {
+      await new Promise((resolve, reject) => {
+        req.on("data", (chunk) => {
+          size += chunk.length;
+          if (size > MAX_BODY_BYTES) return reject();
+          raw += chunk;
         });
+        req.on("end", resolve);
+        req.on("error", reject);
+      });
+    } catch {
+      return res.status(413).json({ error: "Payload too large" });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return res.status(400).json({ error: "Invalid JSON" });
+    }
+
+    const compressed = compressReading(data);
+
+    // ✅ previous data
+    const prev = await latestCol.findOne({ _id: "latest" }) || {};
+    const previousFlow = prev.r || 0;
+    const lastAlertTime = prev.lastAlert || 0;
+
+    // ✅ compute status
+    const { status, flow } = computeStatus(compressed.r, previousFlow);
+    const nowTime = Date.now();
+
+    const entry = {
+      p: compressed.p,
+      r: flow,
+      la: compressed.la,
+      lo: compressed.lo,
+      s: status,
+      t: nowTime,
+      d: todayIST(),
+    };
+
+    // ==========================
+    // SAVE HISTORY
+    // ==========================
+    if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
+      await historyCol.insertOne(entry);
+
+      const count = await historyCol.estimatedDocumentCount();
+      if (count > MAX_HISTORY_DOCS) {
+        const extra = count - MAX_HISTORY_DOCS;
+
+        const oldest = await historyCol
+          .find({})
+          .sort({ t: 1 })
+          .limit(extra)
+          .project({ _id: 1 })
+          .toArray();
+
+        if (oldest.length > 0) {
+          await historyCol.deleteMany({
+            _id: { $in: oldest.map((x) => x._id) },
+          });
+        }
       }
     }
+
+    // ==========================
+    // ALERT LOGIC
+    // ==========================
+    const cooldownMs = 10000;
+    let alertTime = lastAlertTime;
+
+    if (status === "DANGER" && nowTime - lastAlertTime > cooldownMs) {
+      alertTime = nowTime;
+      sendOneSignalAlert(entry);
+    }
+
+    // ==========================
+    // UPDATE LATEST (SAFE)
+    // ==========================
+    await latestCol.updateOne(
+      { _id: "latest" },
+      {
+        $set: {
+          p: entry.p,
+          r: entry.r,
+          la: entry.la,
+          lo: entry.lo,
+          s: entry.s,
+          t: entry.t,
+          d: entry.d,
+          lastAlert: alertTime,
+        },
+      },
+      { upsert: true }
+    );
+
+    return res.status(200).json({ success: true, status });
   }
-
-  // ==========================
-  // ALERT LOGIC ✅
-  // ==========================
-  const cooldownMs = 10000; // 🔥 10 sec (change if needed)
-
-  let updateData = { ...entry };
-
-  if (status === "DANGER" && nowTime - lastAlertTime > cooldownMs) {
-    updateData.lastAlert = nowTime;
-    sendOneSignalAlert(entry);
-  } else {
-    updateData.lastAlert = lastAlertTime;
-  }
-
-  // ==========================
-  // UPDATE LATEST (ONLY ONCE)
-  // ==========================
-  await latestCol.updateOne(
-    { _id: "latest" },
-    { $set: updateData },
-    { upsert: true }
-  );
-
-  return res.status(200).json({ success: true, status });
-}
-
 
   // ==========================
   // GET LATEST
@@ -263,16 +265,12 @@ export default async function handler(req, res) {
       res.setHeader("Content-Type", "text/csv");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="flowmeter_${
-          req.query.date || "all"
-        }.csv"`
+        `attachment; filename="flowmeter_${req.query.date || "all"}.csv"`
       );
 
       return res.status(200).send(csv);
-    } catch (e) {
-      return res
-        .status(500)
-        .json({ error: "CSV Export Failed" });
+    } catch {
+      return res.status(500).json({ error: "CSV Export Failed" });
     }
   }
 
@@ -296,19 +294,12 @@ async function sendOneSignalAlert(entry) {
       },
       body: JSON.stringify({
         app_id: ONESIGNAL_APP_ID,
-
         included_segments: ["All"],
-
         headings: { en: "🚨 FLOW ALERT" },
-
         contents: {
           en: `DANGER detected!\nRotations: ${entry.r}\n📍 Tap to view location`,
         },
-
-        // ✅ 1. Opens Google Maps directly
         url: mapUrl,
-
-        // ✅ 2. Extra data for app navigation
         data: {
           type: "OPEN_MAP",
           lat: entry.la,
@@ -316,7 +307,6 @@ async function sendOneSignalAlert(entry) {
         },
       }),
     });
-
   } catch (e) {
     console.error(e);
   }
