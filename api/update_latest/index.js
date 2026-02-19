@@ -206,9 +206,16 @@ if (Date.now() - lastSavedTime > SAVE_INTERVAL_MS) {
    // ==========================
 // ALERT — trigger every DANGER with 60s cooldown
 // ==========================
-const lastAlertTime = prev?.lastAlert || 0;
+// 🔥 GET PREVIOUS DATA
+const prev = await latestCol.findOne({ _id: "latest" }) || {};
+
+const lastAlertTime = prev.lastAlert || 0;
+const previousFlow = prev.r || 0;
+const previousStatus = normalizeStatus(prev.s);
+
 const nowTime = Date.now();
-const cooldownMs = 10000; // 🔥 10 sec (change if needed)
+const cooldownMs = 10000; // 10 sec
+
 
 // ==========================
 // UPDATE + ALERT LOGIC
@@ -219,28 +226,27 @@ if (status === "DANGER" && nowTime - lastAlertTime > cooldownMs) {
     {
       $set: {
         ...entry,
-        lastAlert: nowTime, // ✅ store alert time
+        lastAlert: nowTime,
       },
     },
     { upsert: true }
   );
 
-  // 🔔 send notification
   sendOneSignalAlert(entry);
 
 } else {
-  // ✅ normal update (no alert)
   await latestCol.updateOne(
     { _id: "latest" },
     {
       $set: {
         ...entry,
-        lastAlert: lastAlertTime, // ✅ keep old value
+        lastAlert: lastAlertTime,
       },
     },
     { upsert: true }
   );
 }
+
 
   // ==========================
   // GET LATEST
