@@ -5,22 +5,24 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB || "flowmeter";
 const HISTORY_COL = process.env.MONGODB_COLLECTION || "history";
 const LATEST_COL = "latest";
+
 const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
 const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
 
+// ===== CONFIG =====
 const MAX_HISTORY_DOCS = 5000;
 const MAX_BODY_BYTES = 512;
 const SAVE_INTERVAL_MS = 10000;
 
-// ===== Flow Analysis Config =====
-const SAFE_THRESHOLD = 120;   // rotations above this = DANGER
-const SPIKE_LIMIT = 40;       // sudden jump = DANGER
-const NOISE_THRESHOLD = 2;    // ignore tiny changes
+const SAFE_THRESHOLD = 120;
+const SPIKE_LIMIT = 40;
+const NOISE_THRESHOLD = 2;
 
 let cachedClient = null;
-let lastSavedTime = 0;
-let previousFlow = 0;         // ✅ server-side spike tracking
 
+// ======================
+// DB CONNECT
+// ======================
 async function getClient() {
   if (cachedClient) return cachedClient;
   const client = new MongoClient(MONGODB_URI);
@@ -29,29 +31,35 @@ async function getClient() {
   return client;
 }
 
-// ✅ Status computed on backend — single source of truth
-function computeStatus(currentFlow) {
+// ======================
+// STATUS LOGIC (NO GLOBALS)
+// ======================
+function computeStatus(currentFlow, previousFlow) {
   let flow = currentFlow;
 
-  // Ignore noise
+  // Noise filter
   if (Math.abs(flow - previousFlow) < NOISE_THRESHOLD) {
     flow = previousFlow;
   }
 
   let status = "SAFE";
 
+  // Threshold check
   if (flow > SAFE_THRESHOLD) {
     status = "DANGER";
   }
 
+  // Spike detection
   if (Math.abs(flow - previousFlow) > SPIKE_LIMIT) {
     status = "DANGER";
   }
 
-  previousFlow = flow;
-  return status;
+  return { status, flow };
 }
 
+// ======================
+// HELPERS
+// ======================
 function compressReading(input) {
   return {
     p: Number(input.pulses ?? input.p ?? 0),
@@ -62,19 +70,20 @@ function compressReading(input) {
 }
 
 function todayIST() {
-  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  return new Date().toLocaleDateString("en-CA", {
+    timeZone: "Asia/Kolkata",
+  });
 }
 
-// ✅ Normalize status so Flutter always gets SAFE or DANGER, never NORMAL
 function normalizeStatus(s) {
-  if (!s) return "SAFE";
-  const upper = String(s).toUpperCase();
-  if (upper === "DANGER") return "DANGER";
-  return "SAFE"; // NORMAL, SAFE, anything else → SAFE
+  return String(s).toUpperCase() === "DANGER" ? "DANGER" : "SAFE";
 }
 
+// ======================
+// MAIN HANDLER
+// ======================
 export default async function handler(req, res) {
-  // ✅ CORS
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "*");
@@ -90,7 +99,7 @@ export default async function handler(req, res) {
   const latestCol = db.collection(LATEST_COL);
 
   // ==========================
-  // ✅ POST — ESP32 sends data
+  // POST (ESP32 DATA)
   // ==========================
   if (req.method === "POST") {
     let raw = "";
@@ -100,53 +109,64 @@ export default async function handler(req, res) {
       await new Promise((resolve, reject) => {
         req.on("data", (chunk) => {
           size += chunk.length;
-          if (size > MAX_BODY_BYTES) return reject(new Error("Too large"));
+          if (size > MAX_BODY_BYTES) return reject();
           raw += chunk;
         });
         req.on("end", resolve);
         req.on("error", reject);
       });
-    } catch (e) {
+    } catch {
       return res.status(413).json({ error: "Payload too large" });
     }
 
     let data;
     try {
       data = JSON.parse(raw);
-    } catch (e) {
+    } catch {
       return res.status(400).json({ error: "Invalid JSON" });
     }
 
     const compressed = compressReading(data);
 
-    // ✅ Compute status server-side
-    const status = computeStatus(compressed.r);
+    // 🔥 GET PREVIOUS FROM DB (NO GLOBAL BUG)
+    const prev = await latestCol.findOne({ _id: "latest" });
+    const previousFlow = prev?.r ?? 0;
+    const previousStatus = normalizeStatus(prev?.s);
+
+    // 🔥 COMPUTE STATUS
+    const { status, flow } = computeStatus(compressed.r, previousFlow);
 
     const now = new Date();
     const entry = {
       ...compressed,
+      r: flow,
       s: status,
       t: now.getTime(),
       d: todayIST(),
     };
 
-    // ✅ Get previous status for alert comparison
-    const prev = await latestCol.findOne({ _id: "latest" });
-    const previousStatus = normalizeStatus(prev?.s);
-
-    // ✅ Update latest
+    // UPDATE LATEST
     await latestCol.updateOne(
       { _id: "latest" },
       { $set: entry },
       { upsert: true }
     );
 
-    // ✅ Save to history every 10 seconds
-    if (Date.now() - lastSavedTime > SAVE_INTERVAL_MS) {
-      await historyCol.insertOne({ ...entry });
-      lastSavedTime = Date.now();
+    // ==========================
+    // SAVE EVERY 10 SEC (DB-BASED)
+    // ==========================
+    const last = await historyCol
+      .find({})
+      .sort({ t: -1 })
+      .limit(1)
+      .toArray();
 
-      // ✅ Trim old records
+    const lastTime = last[0]?.t ?? 0;
+
+    if (Date.now() - lastTime > SAVE_INTERVAL_MS) {
+      await historyCol.insertOne(entry);
+
+      // TRIM DATA
       const count = await historyCol.estimatedDocumentCount();
       if (count > MAX_HISTORY_DOCS) {
         const extra = count - MAX_HISTORY_DOCS;
@@ -156,13 +176,18 @@ export default async function handler(req, res) {
           .limit(extra)
           .project({ _id: 1 })
           .toArray();
+
         if (oldest.length > 0) {
-          await historyCol.deleteMany({ _id: { $in: oldest.map((x) => x._id) } });
+          await historyCol.deleteMany({
+            _id: { $in: oldest.map((x) => x._id) },
+          });
         }
       }
     }
 
-    // ✅ OneSignal alert — only on DANGER transition
+    // ==========================
+    // ALERT
+    // ==========================
     if (status === "DANGER" && previousStatus !== "DANGER") {
       sendOneSignalAlert(entry);
     }
@@ -171,7 +196,7 @@ export default async function handler(req, res) {
   }
 
   // ==========================
-  // ✅ GET Latest
+  // GET LATEST
   // ==========================
   if (req.method === "GET" && !req.query.date && !req.query.csv) {
     const latest = await latestCol.findOne({ _id: "latest" });
@@ -182,20 +207,18 @@ export default async function handler(req, res) {
       rotations: latest.r,
       lat: latest.la,
       lon: latest.lo,
-      status: normalizeStatus(latest.s), // ✅ always SAFE or DANGER
+      status: normalizeStatus(latest.s),
       timestamp: latest.t,
       date: latest.d,
     });
   }
 
   // ==========================
-  // ✅ GET History by date
+  // GET HISTORY
   // ==========================
   if (req.method === "GET" && req.query.date && !req.query.csv) {
-    const date = req.query.date;
-
     const list = await historyCol
-      .find({ d: date })
+      .find({ d: req.query.date })
       .sort({ t: -1 })
       .limit(2000)
       .toArray();
@@ -206,7 +229,7 @@ export default async function handler(req, res) {
         rotations: x.r,
         lat: x.la,
         lon: x.lo,
-        status: normalizeStatus(x.s), // ✅ normalized
+        status: normalizeStatus(x.s),
         timestamp: x.t,
         date: x.d,
       }))
@@ -214,7 +237,7 @@ export default async function handler(req, res) {
   }
 
   // ==========================
-  // ✅ CSV Export
+  // CSV EXPORT
   // ==========================
   if (req.method === "GET" && req.query.csv) {
     try {
@@ -226,27 +249,31 @@ export default async function handler(req, res) {
         .limit(5000)
         .toArray();
 
-      let csv = "datetime,timestamp,status,pulses,rotations,lat,lon\n";
+      let csv =
+        "datetime,timestamp,status,pulses,rotations,lat,lon\n";
 
       for (const x of list) {
         const dt = new Date(Number(x.t)).toLocaleString("en-GB", {
           timeZone: "Asia/Kolkata",
           hour12: false,
         });
+
         csv += `"${dt}","${x.t}",${normalizeStatus(x.s)},${x.p},${x.r},${x.la},${x.lo}\n`;
       }
 
       res.setHeader("Content-Type", "text/csv");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="flowmeter_history${
-          req.query.date ? "_" + req.query.date : ""
+        `attachment; filename="flowmeter_${
+          req.query.date || "all"
         }.csv"`
       );
 
       return res.status(200).send(csv);
     } catch (e) {
-      return res.status(500).json({ error: "CSV Export Failed", details: String(e) });
+      return res
+        .status(500)
+        .json({ error: "CSV Export Failed" });
     }
   }
 
@@ -254,7 +281,7 @@ export default async function handler(req, res) {
 }
 
 // ======================
-// 🔔 OneSignal Alert
+// 🔔 ALERT
 // ======================
 async function sendOneSignalAlert(entry) {
   try {
@@ -269,23 +296,13 @@ async function sendOneSignalAlert(entry) {
       body: JSON.stringify({
         app_id: ONESIGNAL_APP_ID,
         included_segments: ["All"],
-        headings: { en: "🚨 FLOW METER ALERT" },
+        headings: { en: "🚨 FLOW ALERT" },
         contents: {
-          en: `⚠️ DANGER detected!\nPulses: ${entry.p} | Rotations: ${entry.r}\nLocation: ${entry.la}, ${entry.lo}`,
-        },
-        data: {
-          pulses: entry.p,
-          rotations: entry.r,
-          lat: entry.la,
-          lon: entry.lo,
-          status: entry.s,
+          en: `DANGER!\nRotations: ${entry.r}`,
         },
       }),
     });
   } catch (e) {
-    console.error("OneSignal error:", e);
+    console.error(e);
   }
 }
-
-
-
