@@ -98,153 +98,99 @@ export default async function handler(req, res) {
   const historyCol = db.collection(HISTORY_COL);
   const latestCol = db.collection(LATEST_COL);
 
-  // ==========================
-  // POST (ESP32 DATA)
-  // ==========================
-  if (req.method === "POST") {
-    let raw = "";
-    let size = 0;
+ if (req.method === "POST") {
+  let raw = "";
+  let size = 0;
 
-    try {
-      await new Promise((resolve, reject) => {
-        req.on("data", (chunk) => {
-          size += chunk.length;
-          if (size > MAX_BODY_BYTES) return reject();
-          raw += chunk;
-        });
-        req.on("end", resolve);
-        req.on("error", reject);
+  try {
+    await new Promise((resolve, reject) => {
+      req.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > MAX_BODY_BYTES) return reject();
+        raw += chunk;
       });
-    } catch {
-      return res.status(413).json({ error: "Payload too large" });
-    }
-
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return res.status(400).json({ error: "Invalid JSON" });
-    }
-
-    const compressed = compressReading(data);
-
-    // 🔥 GET PREVIOUS FROM DB (NO GLOBAL BUG)
-    const prev = await latestCol.findOne({ _id: "latest" });
-    const previousFlow = prev?.r ?? 0;
-    const previousStatus = normalizeStatus(prev?.s);
-
-    // 🔥 COMPUTE STATUS
-    const { status, flow } = computeStatus(compressed.r, previousFlow);
-
-    const now = new Date();
-    const entry = {
-      ...compressed,
-      r: flow,
-      s: status,
-      t: now.getTime(),
-      d: todayIST(),
-    };
-
-    // UPDATE LATEST
-    await latestCol.updateOne(
-      { _id: "latest" },
-      { $set: entry },
-      { upsert: true }
-    );
-
-    // ==========================
-    // SAVE EVERY 10 SEC (DB-BASED)
-    // ==========================
-
-let lastSavedTime = prev?.t ?? 0;
-
-if (Date.now() - lastSavedTime > SAVE_INTERVAL_MS) {
-  await historyCol.insertOne(entry);
-
-  // ✅ Trim old records
-  const count = await historyCol.estimatedDocumentCount();
-  if (count > MAX_HISTORY_DOCS) {
-    const extra = count - MAX_HISTORY_DOCS;
-    const oldest = await historyCol
-      .find({})
-      .sort({ t: 1 })
-      .limit(extra)
-      .project({ _id: 1 })
-      .toArray();
-
-    if (oldest.length > 0) {
-      await historyCol.deleteMany({
-        _id: { $in: oldest.map((x) => x._id) },
-      });
-    }
+      req.on("end", resolve);
+      req.on("error", reject);
+    });
+  } catch {
+    return res.status(413).json({ error: "Payload too large" });
   }
-}
 
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return res.status(400).json({ error: "Invalid JSON" });
+  }
 
-      // TRIM DATA
-      const count = await historyCol.estimatedDocumentCount();
-      if (count > MAX_HISTORY_DOCS) {
-        const extra = count - MAX_HISTORY_DOCS;
-        const oldest = await historyCol
-          .find({})
-          .sort({ t: 1 })
-          .limit(extra)
-          .project({ _id: 1 })
-          .toArray();
+  const compressed = compressReading(data);
 
-        if (oldest.length > 0) {
-          await historyCol.deleteMany({
-            _id: { $in: oldest.map((x) => x._id) },
-          });
-        }
+  // ✅ GET PREVIOUS
+  const prev = await latestCol.findOne({ _id: "latest" }) || {};
+  const previousFlow = prev.r || 0;
+  const lastAlertTime = prev.lastAlert || 0;
+
+  // ✅ COMPUTE STATUS
+  const { status, flow } = computeStatus(compressed.r, previousFlow);
+
+  const nowTime = Date.now();
+
+  const entry = {
+    ...compressed,
+    r: flow,
+    s: status,
+    t: nowTime,
+    d: todayIST(),
+  };
+
+  // ==========================
+  // SAVE HISTORY (10 sec)
+  // ==========================
+  if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
+    await historyCol.insertOne(entry);
+
+    const count = await historyCol.estimatedDocumentCount();
+    if (count > MAX_HISTORY_DOCS) {
+      const extra = count - MAX_HISTORY_DOCS;
+      const oldest = await historyCol
+        .find({})
+        .sort({ t: 1 })
+        .limit(extra)
+        .project({ _id: 1 })
+        .toArray();
+
+      if (oldest.length > 0) {
+        await historyCol.deleteMany({
+          _id: { $in: oldest.map((x) => x._id) },
+        });
       }
     }
+  }
 
-    // ==========================
-    // ALERT
-    // ==========================
-   // ==========================
-// ALERT — trigger every DANGER with 60s cooldown
-// ==========================
-// 🔥 GET PREVIOUS DATA
-const prev = await latestCol.findOne({ _id: "latest" }) || {};
+  // ==========================
+  // ALERT LOGIC ✅
+  // ==========================
+  const cooldownMs = 10000; // 🔥 10 sec (change if needed)
 
-const lastAlertTime = prev.lastAlert || 0;
-const previousFlow = prev.r || 0;
-const previousStatus = normalizeStatus(prev.s);
+  let updateData = { ...entry };
 
-const nowTime = Date.now();
-const cooldownMs = 10000; // 10 sec
+  if (status === "DANGER" && nowTime - lastAlertTime > cooldownMs) {
+    updateData.lastAlert = nowTime;
+    sendOneSignalAlert(entry);
+  } else {
+    updateData.lastAlert = lastAlertTime;
+  }
 
-
-// ==========================
-// UPDATE + ALERT LOGIC
-// ==========================
-if (status === "DANGER" && nowTime - lastAlertTime > cooldownMs) {
+  // ==========================
+  // UPDATE LATEST (ONLY ONCE)
+  // ==========================
   await latestCol.updateOne(
     { _id: "latest" },
-    {
-      $set: {
-        ...entry,
-        lastAlert: nowTime,
-      },
-    },
+    { $set: updateData },
     { upsert: true }
   );
 
-  sendOneSignalAlert(entry);
-
-} else {
-  await latestCol.updateOne(
-    { _id: "latest" },
-    {
-      $set: {
-        ...entry,
-        lastAlert: lastAlertTime,
-      },
-    },
-    { upsert: true }
-  );
+  return res.status(200).json({ success: true, status });
 }
 
 
