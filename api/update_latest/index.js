@@ -191,19 +191,18 @@ export default async function handler(req, res) {
    // ==========================
 // ALERT — trigger every DANGER with 60s cooldown
 // ==========================
-const lastAlertTime = prev?.lastAlert ?? 0;
-const cooldownMs = 60000; // ✅ 60 seconds between alerts
-
-if (status === "DANGER" && (Date.now() - lastAlertTime > cooldownMs)) {
-  // ✅ Save alert time to DB so it persists across serverless instances
+if (
+  status === "DANGER" &&
+  (previousStatus !== "DANGER" ||
+   Date.now() - (prev?.lastAlert ?? 0) > 30000)
+) {
   await latestCol.updateOne(
     { _id: "latest" },
     { $set: { lastAlert: Date.now() } }
   );
+
   sendOneSignalAlert(entry);
 }
-    return res.status(200).json({ success: true, status });
-  }
 
   // ==========================
   // GET LATEST
@@ -297,6 +296,8 @@ async function sendOneSignalAlert(entry) {
   try {
     if (!ONESIGNAL_APP_ID || !ONESIGNAL_API_KEY) return;
 
+    const mapUrl = `https://www.google.com/maps?q=${entry.la},${entry.lo}`;
+
     await fetch("https://onesignal.com/api/v1/notifications", {
       method: "POST",
       headers: {
@@ -305,13 +306,27 @@ async function sendOneSignalAlert(entry) {
       },
       body: JSON.stringify({
         app_id: ONESIGNAL_APP_ID,
+
         included_segments: ["All"],
+
         headings: { en: "🚨 FLOW ALERT" },
+
         contents: {
-          en: `DANGER!\nRotations: ${entry.r}`,
+          en: `DANGER detected!\nRotations: ${entry.r}\n📍 Tap to view location`,
+        },
+
+        // ✅ 1. Opens Google Maps directly
+        url: mapUrl,
+
+        // ✅ 2. Extra data for app navigation
+        data: {
+          type: "OPEN_MAP",
+          lat: entry.la,
+          lon: entry.lo,
         },
       }),
     });
+
   } catch (e) {
     console.error(e);
   }
