@@ -140,27 +140,38 @@ export default async function handler(req, res) {
     // ==========================
     // SAVE HISTORY
     // ==========================
-    if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
-      await historyCol.insertOne(entry);
+ // ==========================
+// SAVE HISTORY (FIXED)
+// ==========================
+const last = await historyCol
+  .find({})
+  .sort({ t: -1 })
+  .limit(1)
+  .toArray();
 
-      const count = await historyCol.estimatedDocumentCount();
-      if (count > MAX_HISTORY_DOCS) {
-        const extra = count - MAX_HISTORY_DOCS;
+const lastTime = last[0]?.t || 0;
 
-        const oldest = await historyCol
-          .find({})
-          .sort({ t: 1 })
-          .limit(extra)
-          .project({ _id: 1 })
-          .toArray();
+if (nowTime - lastTime > SAVE_INTERVAL_MS) {
+  await historyCol.insertOne(entry);
 
-        if (oldest.length > 0) {
-          await historyCol.deleteMany({
-            _id: { $in: oldest.map((x) => x._id) },
-          });
-        }
-      }
+  const count = await historyCol.estimatedDocumentCount();
+  if (count > MAX_HISTORY_DOCS) {
+    const extra = count - MAX_HISTORY_DOCS;
+
+    const oldest = await historyCol
+      .find({})
+      .sort({ t: 1 })
+      .limit(extra)
+      .project({ _id: 1 })
+      .toArray();
+
+    if (oldest.length > 0) {
+      await historyCol.deleteMany({
+        _id: { $in: oldest.map((x) => x._id) },
+      });
     }
+  }
+}
 
     // ==========================
     // ALERT LOGIC
@@ -177,21 +188,22 @@ export default async function handler(req, res) {
     // UPDATE LATEST (SAFE)
     // ==========================
     await latestCol.updateOne(
-      { _id: "latest" },
-      {
-        $set: {
-          p: entry.p,
-          r: entry.r,
-          la: entry.la,
-          lo: entry.lo,
-          s: entry.s,
-          t: entry.t,
-          d: entry.d,
-          lastAlert: alertTime,
-        },
-      },
-      { upsert: true }
-    );
+  { _id: "latest" },
+  {
+    $set: {
+      p: entry.p,
+      r: entry.r,
+      la: entry.la,
+      lo: entry.lo,
+      s: entry.s,
+      t: entry.t,
+      d: entry.d,
+      lastAlert: alertTime,
+    },
+  },
+  { upsert: true }
+);
+
 
     return res.status(200).json({ success: true, status });
   }
