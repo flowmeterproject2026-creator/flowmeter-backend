@@ -155,16 +155,31 @@ export default async function handler(req, res) {
     // ==========================
     // SAVE EVERY 10 SEC (DB-BASED)
     // ==========================
-    const last = await historyCol
+
+let lastSavedTime = prev?.t ?? 0;
+
+if (Date.now() - lastSavedTime > SAVE_INTERVAL_MS) {
+  await historyCol.insertOne(entry);
+
+  // ✅ Trim old records
+  const count = await historyCol.estimatedDocumentCount();
+  if (count > MAX_HISTORY_DOCS) {
+    const extra = count - MAX_HISTORY_DOCS;
+    const oldest = await historyCol
       .find({})
-      .sort({ t: -1 })
-      .limit(1)
+      .sort({ t: 1 })
+      .limit(extra)
+      .project({ _id: 1 })
       .toArray();
 
-    const lastTime = last[0]?.t ?? 0;
+    if (oldest.length > 0) {
+      await historyCol.deleteMany({
+        _id: { $in: oldest.map((x) => x._id) },
+      });
+    }
+  }
+}
 
-    if (Date.now() - lastTime > SAVE_INTERVAL_MS) {
-      await historyCol.insertOne(entry);
 
       // TRIM DATA
       const count = await historyCol.estimatedDocumentCount();
@@ -191,17 +206,40 @@ export default async function handler(req, res) {
    // ==========================
 // ALERT — trigger every DANGER with 60s cooldown
 // ==========================
-if (
-  status === "DANGER" &&
-  (previousStatus !== "DANGER" ||
-   Date.now() - (prev?.lastAlert ?? 0) > 30000)
-) {
+const lastAlertTime = prev?.lastAlert || 0;
+const nowTime = Date.now();
+const cooldownMs = 10000; // 🔥 10 sec (change if needed)
+
+// ==========================
+// UPDATE + ALERT LOGIC
+// ==========================
+if (status === "DANGER" && nowTime - lastAlertTime > cooldownMs) {
   await latestCol.updateOne(
     { _id: "latest" },
-    { $set: { lastAlert: Date.now() } }
+    {
+      $set: {
+        ...entry,
+        lastAlert: nowTime, // ✅ store alert time
+      },
+    },
+    { upsert: true }
   );
 
+  // 🔔 send notification
   sendOneSignalAlert(entry);
+
+} else {
+  // ✅ normal update (no alert)
+  await latestCol.updateOne(
+    { _id: "latest" },
+    {
+      $set: {
+        ...entry,
+        lastAlert: lastAlertTime, // ✅ keep old value
+      },
+    },
+    { upsert: true }
+  );
 }
 
   // ==========================
