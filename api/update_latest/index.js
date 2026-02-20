@@ -193,7 +193,7 @@ export default async function handler(req, res) {
     // With the spike check removed, alerts only fire when flow truly exceeds
     // SAFE_THRESHOLD (120). A 60s cooldown prevents notification spam during
     // a sustained dangerous current event.
-    const cooldownMs = 60000;
+    const cooldownMs = 5000;
     let alertTime = lastAlertTime;
 
     if (status === "DANGER" && nowTime - lastAlertTime > cooldownMs) {
