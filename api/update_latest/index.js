@@ -35,18 +35,25 @@ async function getClient() {
 function computeStatus(currentFlow, previousFlow) {
   let flow = currentFlow;
 
+  // ignore noise
   if (Math.abs(flow - previousFlow) < NOISE_THRESHOLD) {
     flow = previousFlow;
   }
 
   let status = "SAFE";
 
-  if (flow > SAFE_THRESHOLD) status = "DANGER";
-  if (Math.abs(flow - previousFlow) > SPIKE_LIMIT) status = "DANGER";
+  // threshold check
+  if (flow > SAFE_THRESHOLD) {
+    status = "DANGER";
+  }
+
+  // spike check
+  if (Math.abs(flow - previousFlow) > SPIKE_LIMIT) {
+    status = "DANGER";
+  }
 
   return { status, flow };
 }
-
 // ======================
 // HELPERS
 // ======================
@@ -143,15 +150,8 @@ export default async function handler(req, res) {
  // ==========================
 // SAVE HISTORY (FIXED)
 // ==========================
-const last = await historyCol
-  .find({})
-  .sort({ t: -1 })
-  .limit(1)
-  .toArray();
-
-const lastTime = last[0]?.t || 0;
-
-if (nowTime - lastTime > SAVE_INTERVAL_MS) {
+// ✅ FAST HISTORY SAVE (NO QUERY)
+if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
   await historyCol.insertOne(entry);
 
   const count = await historyCol.estimatedDocumentCount();
@@ -167,7 +167,7 @@ if (nowTime - lastTime > SAVE_INTERVAL_MS) {
 
     if (oldest.length > 0) {
       await historyCol.deleteMany({
-        _id: { $in: oldest.map((x) => x._id) },
+        _id: { $in: oldest.map(x => x._id) }
       });
     }
   }
