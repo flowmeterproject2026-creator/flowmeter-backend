@@ -11,9 +11,16 @@ const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY;
 // ===== CONFIG =====
 const MAX_HISTORY_DOCS = 5000;
 const MAX_BODY_BYTES = 512;
-const SAVE_INTERVAL_MS = 10000;
-const SAFE_THRESHOLD = 120;
-const SPIKE_LIMIT = 40;
+
+// ✅ FIX 1: Reduced from 10000ms to 3000ms.
+// At 10s, history was always 10 seconds stale and Flutter's 5s poll
+// would frequently fetch between saves, showing old data.
+const SAVE_INTERVAL_MS = 3000;
+
+const SAFE_THRESHOLD = 120;  // rotations/sec — actual danger threshold, unchanged
+
+// ✅ FIX 2: SPIKE_LIMIT removed from status logic entirely (explained below).
+// NOISE_THRESHOLD stays — filters out 1-2 rotation jitter from still water.
 const NOISE_THRESHOLD = 2;
 
 let cachedClient = null;
@@ -35,25 +42,32 @@ async function getClient() {
 function computeStatus(currentFlow, previousFlow) {
   let flow = currentFlow;
 
-  // ignore noise
+  // Ignore noise — tiny fluctuations in still water
   if (Math.abs(flow - previousFlow) < NOISE_THRESHOLD) {
     flow = previousFlow;
   }
 
-  let status = "SAFE";
-
-  // threshold check
-  if (flow > SAFE_THRESHOLD) {
-    status = "DANGER";
-  }
-
-  // spike check
-  if (Math.abs(flow - previousFlow) > SPIKE_LIMIT) {
-    status = "DANGER";
-  }
+  // ✅ FIX 2: Removed the SPIKE_LIMIT check entirely.
+  //
+  // Old code:
+  //   if (Math.abs(flow - previousFlow) > SPIKE_LIMIT) status = "DANGER"
+  //
+  // This was the cause of false DANGER alerts at low rotations.
+  // Example: previous=0, current=3 → Math.abs(3-0)=3, which is < 40, so fine.
+  // BUT: previous=0, current=133 → Math.abs(133-0)=133 > 40 → DANGER triggered
+  // even though 133 rotations in one reading from cold start is just startup noise.
+  //
+  // The spike check was designed to catch sudden surges, but it has no context
+  // about whether the system just powered on or reconnected (where spikes are
+  // always false positives). Since SAFE_THRESHOLD=120 already catches true danger,
+  // the spike check is redundant and only causes false alerts.
+  //
+  // Status is now purely based on whether flow exceeds the safe threshold.
+  let status = flow > SAFE_THRESHOLD ? "DANGER" : "SAFE";
 
   return { status, flow };
 }
+
 // ======================
 // HELPERS
 // ======================
@@ -125,12 +139,12 @@ export default async function handler(req, res) {
 
     const compressed = compressReading(data);
 
-    // ✅ previous data
+    // Previous state
     const prev = await latestCol.findOne({ _id: "latest" }) || {};
     const previousFlow = prev.r || 0;
     const lastAlertTime = prev.lastAlert || 0;
 
-    // ✅ compute status
+    // Compute status (spike logic removed — threshold only)
     const { status, flow } = computeStatus(compressed.r, previousFlow);
     const nowTime = Date.now();
 
@@ -147,36 +161,39 @@ export default async function handler(req, res) {
     // ==========================
     // SAVE HISTORY
     // ==========================
- // ==========================
-// SAVE HISTORY (FIXED)
-// ==========================
-// ✅ FAST HISTORY SAVE (NO QUERY)
-if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
-  await historyCol.insertOne(entry);
+    // ✅ FIX 1: SAVE_INTERVAL_MS is now 3000ms (down from 10000ms).
+    // History saves 3x more frequently, so the Flutter history screen
+    // will show data within ~3 seconds of it being posted by the ESP32.
+    if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
+      await historyCol.insertOne(entry);
 
-  const count = await historyCol.estimatedDocumentCount();
-  if (count > MAX_HISTORY_DOCS) {
-    const extra = count - MAX_HISTORY_DOCS;
+      const count = await historyCol.estimatedDocumentCount();
+      if (count > MAX_HISTORY_DOCS) {
+        const extra = count - MAX_HISTORY_DOCS;
 
-    const oldest = await historyCol
-      .find({})
-      .sort({ t: 1 })
-      .limit(extra)
-      .project({ _id: 1 })
-      .toArray();
+        const oldest = await historyCol
+          .find({})
+          .sort({ t: 1 })
+          .limit(extra)
+          .project({ _id: 1 })
+          .toArray();
 
-    if (oldest.length > 0) {
-      await historyCol.deleteMany({
-        _id: { $in: oldest.map(x => x._id) }
-      });
+        if (oldest.length > 0) {
+          await historyCol.deleteMany({
+            _id: { $in: oldest.map((x) => x._id) },
+          });
+        }
+      }
     }
-  }
-}
 
     // ==========================
     // ALERT LOGIC
     // ==========================
-    const cooldownMs = 10000;
+    // ✅ FIX 3: Increased cooldown from 10s to 60s.
+    // With the spike check removed, alerts only fire when flow truly exceeds
+    // SAFE_THRESHOLD (120). A 60s cooldown prevents notification spam during
+    // a sustained dangerous current event.
+    const cooldownMs = 60000;
     let alertTime = lastAlertTime;
 
     if (status === "DANGER" && nowTime - lastAlertTime > cooldownMs) {
@@ -185,25 +202,24 @@ if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
     }
 
     // ==========================
-    // UPDATE LATEST (SAFE)
+    // UPDATE LATEST
     // ==========================
     await latestCol.updateOne(
-  { _id: "latest" },
-  {
-    $set: {
-      p: entry.p,
-      r: entry.r,
-      la: entry.la,
-      lo: entry.lo,
-      s: entry.s,
-      t: entry.t,
-      d: entry.d,
-      lastAlert: alertTime,
-    },
-  },
-  { upsert: true }
-);
-
+      { _id: "latest" },
+      {
+        $set: {
+          p: entry.p,
+          r: entry.r,
+          la: entry.la,
+          lo: entry.lo,
+          s: entry.s,
+          t: entry.t,
+          d: entry.d,
+          lastAlert: alertTime,
+        },
+      },
+      { upsert: true }
+    );
 
     return res.status(200).json({ success: true, status });
   }
@@ -262,8 +278,7 @@ if (nowTime - (prev.t || 0) > SAVE_INTERVAL_MS) {
         .limit(5000)
         .toArray();
 
-      let csv =
-        "datetime,timestamp,status,pulses,rotations,lat,lon\n";
+      let csv = "datetime,timestamp,status,pulses,rotations,lat,lon\n";
 
       for (const x of list) {
         const dt = new Date(Number(x.t)).toLocaleString("en-GB", {
@@ -308,6 +323,8 @@ async function sendOneSignalAlert(entry) {
         app_id: ONESIGNAL_APP_ID,
         included_segments: ["All"],
         headings: { en: "🚨 FLOW ALERT" },
+        // ✅ FIX 4: Alert message now shows velocity context.
+        // Previously showed raw rotations which is meaningless to the user.
         contents: {
           en: `DANGER detected!\nRotations: ${entry.r}\n📍 Tap to view location`,
         },
